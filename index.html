@@ -187,6 +187,36 @@
     clip: rect(0 0 0 0); white-space: nowrap;
   }
 
+  /* Daily counts (closing) */
+  .daily {
+    margin: 0 0 1.2rem; padding: 1rem 1.2rem 1.2rem;
+    border: 4px solid var(--pink); border-radius: 18px; background: var(--white);
+  }
+  .daily.saved { border-color: var(--blue); background: var(--pink-soft); }
+  .daily h3 { margin: 0 0 0.2rem; font-size: 1.5rem; color: var(--blue); }
+  .daily .hint { margin: 0 0 0.8rem; font-size: 1.05rem; font-weight: 600; }
+  .dc-row {
+    display: flex; align-items: center; gap: 0.8rem; flex-wrap: wrap;
+    padding: 0.6rem 0; border-top: 2px solid var(--line);
+  }
+  .dc-row label { flex: 1 1 220px; font-size: 1.35rem; font-weight: 700; }
+  .dc-step {
+    width: 64px; height: 64px; font: inherit; font-size: 2rem; font-weight: 800; line-height: 1;
+    border: 4px solid var(--blue); border-radius: 14px; background: var(--white); color: var(--blue); cursor: pointer;
+  }
+  .dc-row input {
+    width: 7rem; height: 64px; font: inherit; font-size: 1.8rem; font-weight: 800; text-align: center;
+    border: 4px solid var(--blue); border-radius: 14px; color: var(--ink);
+  }
+  .dc-save {
+    width: 100%; margin-top: 0.9rem; min-height: 72px;
+    font: inherit; font-size: 1.4rem; font-weight: 800;
+    background: var(--blue); color: var(--white); border: 0; border-radius: 14px; cursor: pointer;
+  }
+  .dc-save:disabled { opacity: .6; cursor: default; }
+  .dc-msg { margin: 0.7rem 0 0; font-size: 1.15rem; font-weight: 800; min-height: 1.4em; }
+  .dc-msg.err { color: #b00020; }
+
   @media (max-width: 640px) {
     html { font-size: 17px; }
     .home img { height: 64px; }
@@ -282,6 +312,15 @@
       ]
     }
   };
+  // ===== Daily counts (shown at the top of the Closing tab) =====
+  // Saved through the Staff Alerts script into the "Daily" tab of the inventory sheet.
+  const DAILY_URL = "https://script.google.com/macros/s/AKfycby7Mp5yIdmHswJW-WCnM-s3KK4Ms_5lZbmWO4cIdEP4t8ldylACpFXrfheVDps52JQ9UA/exec";
+  const DAILY_ITEMS = [
+    { key: "beans",  label: "Coffee beans (bags)" },
+    { key: "matcha", label: "Matcha (bags)" },
+    { key: "water",  label: "Water (jugs)" }
+  ];
+  const DAILY_STEP = 0.5;   // how much the – / + buttons change the count
   // ===========================
 
   const NAMES = ["opening", "closing"];
@@ -611,8 +650,98 @@
     });
   });
 
+  // ---------- daily counts card ----------
+  const DAILY_KEY = "doblexo-daily-counts";
+  function buildDaily() {
+    const panel = document.getElementById("panel-closing");
+    const card = document.createElement("section");
+    card.className = "daily";
+    card.id = "daily";
+    card.setAttribute("aria-labelledby", "daily-title");
+    card.innerHTML =
+      '<h3 id="daily-title">Daily counts</h3>' +
+      '<p class="hint">Count what\'s left before you clock out. Half bags are OK (like 2.5).</p>' +
+      DAILY_ITEMS.map(it =>
+        '<div class="dc-row">' +
+          '<label for="dc-' + it.key + '">' + it.label + '</label>' +
+          '<button type="button" class="dc-step" data-key="' + it.key + '" data-d="-1" aria-label="Less ' + it.label + '">–</button>' +
+          '<input id="dc-' + it.key + '" type="text" inputmode="decimal" autocomplete="off" placeholder="?">' +
+          '<button type="button" class="dc-step" data-key="' + it.key + '" data-d="1" aria-label="More ' + it.label + '">+</button>' +
+        '</div>').join('') +
+      '<button type="button" class="dc-save" id="dc-save">Save counts</button>' +
+      '<p class="dc-msg" id="dc-msg" aria-live="polite"></p>';
+    const head = panel.querySelector(".panel-head");
+    head.insertAdjacentElement("afterend", card);
+
+    const saved = getLS(DAILY_KEY, null);
+    if (saved && saved.day === dayKey) {
+      DAILY_ITEMS.forEach(it => { document.getElementById("dc-" + it.key).value = saved.counts[it.key]; });
+      markDaily(true, "Saved ✓ " + saved.time + " (you can fix a number and save again)");
+    }
+
+    card.addEventListener("click", e => {
+      const b = e.target.closest(".dc-step"); if (!b) return;
+      const inp = document.getElementById("dc-" + b.dataset.key);
+      const cur = parseFloat(inp.value) || 0;
+      inp.value = Math.max(0, Math.round((cur + Number(b.dataset.d) * DAILY_STEP) * 100) / 100);
+      dirtyDaily();
+    });
+    card.addEventListener("input", e => {
+      if (e.target.tagName !== "INPUT") return;
+      const clean = e.target.value.replace(/[^0-9.]/g, "").replace(/(\..*)\./g, "$1");
+      if (clean !== e.target.value) e.target.value = clean;
+      dirtyDaily();
+    });
+    document.getElementById("dc-save").addEventListener("click", saveDaily);
+  }
+  function markDaily(ok, msg, err) {
+    document.getElementById("daily").classList.toggle("saved", ok);
+    const m = document.getElementById("dc-msg");
+    m.textContent = msg || "";
+    m.classList.toggle("err", !!err);
+  }
+  function dirtyDaily() {
+    if (document.getElementById("daily").classList.contains("saved")) markDaily(false, "Changed – tap Save counts again");
+  }
+  async function saveDaily() {
+    const counts = {};
+    for (const it of DAILY_ITEMS) {
+      const v = document.getElementById("dc-" + it.key).value.trim();
+      if (v === "" || isNaN(Number(v))) {
+        markDaily(false, "Enter a number for " + it.label + ".", true);
+        document.getElementById("dc-" + it.key).focus();
+        return;
+      }
+      counts[it.key] = Number(v);
+    }
+    if (!pin) { showPin(); return; }
+    const btn = document.getElementById("dc-save");
+    btn.disabled = true; btn.textContent = "Saving…";
+    try {
+      const res = await fetch(DAILY_URL, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ action: "daily", pin, counts })
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        markDaily(false, data.error === "bad_pin" ? "Counts didn't save: PIN not accepted. Tell the owner." : (data.message || "Couldn't save. Try again."), true);
+        return;
+      }
+      const t = timeNow();
+      setLS(DAILY_KEY, { day: dayKey, counts, time: t });
+      markDaily(true, "Saved ✓ " + t);
+      announce("Daily counts saved.");
+    } catch (err) {
+      markDaily(false, "Couldn't reach the log. Check the Wi-Fi and try again.", true);
+    } finally {
+      btn.disabled = false; btn.textContent = "Save counts";
+    }
+  }
+
   // ---------- start ----------
   NAMES.forEach(build);
+  buildDaily();
   paintAll();
   const lastTab = document.getElementById(getLS("doblexo-checklist-tab", ""));
   if (lastTab) select(lastTab, false);
